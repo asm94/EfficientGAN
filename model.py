@@ -1,6 +1,7 @@
 import tensorflow as tf
 from tensorflow.python.keras.layers import Input, Dense, LeakyReLU, Concatenate, Dropout
 from tensorflow.python.keras.models import Model
+from sklearn.preprocessing import minmax_scale
 import numpy as np
 
 class EfficientGAN(object):
@@ -10,7 +11,8 @@ class EfficientGAN(object):
       
     #Train model
     def fit(self, X_train, epochs=50, batch_size=50, loss=tf.keras.losses.BinaryCrossentropy(),
-            optimizer=tf.keras.optimizers.Adam(lr=1e-5, beta_1=0.5), verbose=1):
+            optimizer=tf.keras.optimizers.Adam(lr=1e-5, beta_1=0.5), test=tuple(), early_stop_num=50,
+            verbose=1):
         
         #Convert training-data to numpy format
         X_train = np.array(X_train)
@@ -39,6 +41,8 @@ class EfficientGAN(object):
         gen_dis.compile(loss=loss, optimizer=optimizer)          
         
         #Training
+        min_val_loss = float('inf')
+        stop_count = 0
         for i in range(epochs):    
             #Unfreeze Discriminator
             self.dis.trainable = True
@@ -55,10 +59,9 @@ class EfficientGAN(object):
             enc_noise = self.enc.predict(real_data)
                
             #Train Discriminator
-            cat_data = np.concatenate([real_data, gen_data])
-            cat_noise = np.concatenate([enc_noise, noise])
-            cat_label = np.concatenate([np.ones((len(real_data), 1)), np.zeros((len(gen_data), 1))])         
-            d_loss = self.dis.train_on_batch([cat_data, cat_noise], cat_label)
+            d_enc_loss = self.dis.train_on_batch([real_data, enc_noise], np.ones((len(real_data), 1)))
+            d_gen_loss = self.dis.train_on_batch([gen_data, noise], np.zeros((len(gen_data), 1)))
+            d_loss = d_enc_loss + d_gen_loss
     
             #Freeze Discriminator to train Encoder and Generator
             self.dis.trainable = False
@@ -68,12 +71,38 @@ class EfficientGAN(object):
         
             #Train Generator
             g_loss = gen_dis.train_on_batch(noise, np.ones((len(noise), 1)))
-        
+                 
+            #Calculate test loss
+            if len(test)>0:
+                #Get testing-data
+                X_test = test[0]
+                y_true = test[1]
+                
+                #Predict testing-data
+                proba = self.predict(X_test)
+                proba = minmax_scale(proba)
+                
+                #As "val_loss", calculate binary cross entropy
+                val_loss = tf.keras.losses.binary_crossentropy(y_true, proba).numpy()
+                
+                #If "val_loss" is less than "min_val_loss"
+                if min_val_loss > val_loss:                                        
+                    min_val_loss = val_loss #Update "min_val_loss" to "val_loss"
+                    stop_count = 0 #Change "stop_count" to 0
+                #If "stop_count" is equal or more than "early_stop_num", training is end
+                elif stop_count >= early_stop_num:
+                    break
+                #Else, "stop_count" is added 1
+                else:
+                    stop_count += 1               
+                    
             #Display learning progress
-            if verbose==1: print(f'd_loss:{d_loss}  e_loss:{e_loss}  g_loss:{g_loss}')
+            if verbose==1 and i%100==0:
+                if len(test)==0: print(f'epoch{i}-> d_loss:{d_loss}  e_loss:{e_loss}  g_loss:{g_loss}')
+                else: print(f'epoch{i}-> d_loss:{d_loss}  e_loss:{e_loss}  g_loss:{g_loss}  val_loss:{val_loss}')
     
     #Test model
-    def predict(self, X_test, weight=0.1, degree=1):
+    def predict(self, X_test, weight=0.9, degree=1):
         
         #Convert testing-data to numpy format
         X_test = np.array(X_test)
@@ -108,56 +137,65 @@ class EfficientGAN(object):
         return weight*gen_score + (1-weight)*dis_score      
         
     ##Encoder
-    def get_encoder(self):
+    def get_encoder(self, initializer=tf.keras.initializers.GlorotUniform()):
         inputs = Input(shape=(self.input_dim,), name='input')
         net = inputs
-        net = Dense(64, activation=LeakyReLU(alpha=0.1), name='layer_1')(net)
-        outputs = Dense(self.latent_dim, activation='linear', name='output')(net)
+        net = Dense(64, activation=LeakyReLU(alpha=0.1), kernel_initializer=initializer,
+                    name='layer_1')(net)
+        outputs = Dense(self.latent_dim, activation='linear', kernel_initializer=initializer,
+                        name='output')(net)
     
         return Model(inputs=inputs, outputs=outputs, name='Encoder')
     
     ##Generator
-    def get_generator(self):
+    def get_generator(self, initializer=tf.keras.initializers.GlorotUniform()):
         inputs = Input(shape=(self.latent_dim,), name='input')
         net = inputs
-        net = Dense(64, activation='relu', name='layer_1')(net)
-        net = Dense(128, activation='relu', name='layer_2')(net)
-        outputs = Dense(self.input_dim, activation='linear', name='output')(net)
+        net = Dense(64, activation='relu', kernel_initializer=initializer,
+                    name='layer_1')(net)
+        net = Dense(128, activation='relu', kernel_initializer=initializer,
+                    name='layer_2')(net)
+        outputs = Dense(self.input_dim, activation='linear', kernel_initializer=initializer,
+                        name='output')(net)
     
         return Model(inputs=inputs, outputs=outputs, name='Generator')
     
     ##Discriminator
-    def get_discriminator(self):
+    def get_discriminator(self, initializer=tf.keras.initializers.GlorotUniform()):
         #D(x)
         inputs1 = Input(shape=(self.input_dim,), name='real')
         net = inputs1
-        net = Dense(128, activation=LeakyReLU(alpha=0.1), name='layer_1')(net)
+        net = Dense(128, activation=LeakyReLU(alpha=0.1), kernel_initializer=initializer,
+                    name='layer_1')(net)
         dx = Dropout(.2)(net)
     
         #D(z)
         inputs2 = Input(shape=(self.latent_dim,), name='noise')
         net = inputs2
-        net = Dense(128, activation=LeakyReLU(alpha=0.1), name='layer_2')(net)
+        net = Dense(128, activation=LeakyReLU(alpha=0.1), kernel_initializer=initializer,
+                    name='layer_2')(net)
         dz = Dropout(.2)(net)
     
         #concat D(x) and D(z)
         conet = Concatenate(axis=1)([dx,dz])
     
         #D(x,z)
-        conet = Dense(128, activation=LeakyReLU(alpha=0.1), name='layer_3')(conet)
+        conet = Dense(128, activation=LeakyReLU(alpha=0.1), kernel_initializer=initializer,
+                      name='layer_3')(conet)
         conet = Dropout(.2)(conet)
-        outputs = Dense(1, activation='sigmoid', name='output')(conet)
+        outputs = Dense(1, activation='sigmoid', kernel_initializer=initializer,
+                        name='output')(conet)
 
         return Model(inputs=[inputs1,inputs2], outputs=outputs, name='Discriminator')
 
 #for debug    
-def run(X_train, X_test):
+def run(X_train, X_test, y_true):
     model = EfficientGAN()
-    model.fit(X_train)
+    model.fit(X_train, test=(X_test,y_true))
     proba = model.predict(X_test)
     
 from sklearn.datasets import load_iris
 if __name__ == '__main__':    
-    iris = load_iris()    
-    run(iris['data'], iris['data'])
+    iris = load_iris()   
+    run(iris['data'], iris['data'], iris['target'])
     
