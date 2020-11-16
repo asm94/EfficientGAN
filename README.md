@@ -8,6 +8,19 @@ EfficientNet with keras.
 -cudnn      == 7.6.5  
 -tensorflow == 2.3.1
 
+# Usage
+
+```python
+from model import EfficientGAN
+
+iris = load_iris()
+X_train, X_test, y_true = (iris['data'], iris['data'], iris['target'])
+
+model = EfficientGAN()
+model.fit(X_train, test=(X_test,y_true))
+proba = model.predict(X_test)
+```
+
 # Reference
 -Article  
 https://arxiv.org/abs/1802.06222   
